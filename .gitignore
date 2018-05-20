@@ -21,3 +21,4 @@ cheat/
 *.log
 B3-Mimic
 *.swp
+*.o
