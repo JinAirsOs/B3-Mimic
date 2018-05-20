@@ -15,7 +15,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/bytom/consensus/difficulty"
+	//"github.com/bytom/consensus/difficulty"
+	"github.com/bytom/mining/tensority"
 	"github.com/bytom/protocol/bc"
 	"github.com/bytom/protocol/bc/types"
 	bytomutil "github.com/bytom/util"
@@ -286,7 +287,7 @@ func (m *Miner) Mine(job MineJob) bool {
 
 	log.Printf("Job %s: Mining at height: %d\n", job.JobId, bh.Height)
 
-	log.Printf("Job %s: Old target: %v\n", job.JobId, difficulty.CompactToBig(bh.Bits))
+	log.Printf("Job %s: Old target: %v\n", job.JobId, CompactToBig(bh.Bits))
 	newDiff := getNewTargetDiff(job.Target)
 	log.Printf("Job %s: New target: %v\n", job.JobId, newDiff)
 
@@ -306,15 +307,15 @@ func (m *Miner) Mine(job MineJob) bool {
 			}
 
 			// if difficulty.CheckProofOfWork(&headerHash, &seedHash, bh.Bits) {
-			if difficulty.CheckProofOfWork(&headerHash, &seedHash, difficulty.BigToCompact(newDiff)) {
+			if t := CheckPOW(&headerHash, &seedHash, BigToCompact(newDiff), bh.Bits); t > 0 {
 				log.Printf("Job %s: Target found! Proof hash: 0x%v\n", job.JobId, headerHash.String())
 
-				if difficulty.CheckProofOfWork(&headerHash, &seedHash, bh.Bits) {
+				if t == 2 {
 					log.Println("Block found!")
 					go func(blockheader types.BlockHeader) {
 						m.SubmitBlock(blockheader)
 					}(*bh)
-				} else {
+				} else if t == 1 {
 					go func(jobid string, i uint64) {
 						m.SubmitWork(jobid, i)
 					}(job.JobId, i)
@@ -431,4 +432,90 @@ func getNonceStr(i uint64) string {
 	nonceStr := strconv.FormatUint(i, 16)
 	nonceStr = fmt.Sprintf("%016s", nonceStr)
 	return nonceStr
+}
+
+func HashToBig(hash *bc.Hash) *big.Int {
+	// reverse the bytes of the hash (little-endian) to use it in the big
+	// package (big-endian)
+	buf := hash.Byte32()
+	blen := len(buf)
+	for i := 0; i < blen/2; i++ {
+		buf[i], buf[blen-1-i] = buf[blen-1-i], buf[i]
+	}
+
+	return new(big.Int).SetBytes(buf[:])
+}
+
+//0 not pass 1 pass target not pass bits,2 pass bits network is new block
+func CheckPOW(hash, seed *bc.Hash, target, bits uint64) (ret int) {
+	compareHash := tensority.AIHash.Hash(hash, seed)
+	tmp := HashToBig(compareHash)
+
+	if tmp.Cmp(CompactToBig(target)) <= 0 {
+		ret = 1
+	} else {
+		ret = 0
+		return
+	}
+	if tmp.Cmp(CompactToBig(bits)) <= 0 {
+		ret = 2
+	}
+	return
+}
+
+func CompactToBig(compact uint64) *big.Int {
+	// Extract the mantissa, sign bit, and exponent.
+	mantissa := compact & 0x007fffffffffffff
+	isNegative := compact&0x0080000000000000 != 0
+	exponent := uint(compact >> 56)
+
+	var bn *big.Int
+	if exponent <= 3 {
+		mantissa >>= 8 * (3 - exponent)
+		bn = big.NewInt(int64(mantissa))
+	} else {
+		bn = big.NewInt(int64(mantissa))
+		bn.Lsh(bn, 8*(exponent-3))
+	}
+
+	if isNegative {
+		bn = bn.Neg(bn)
+	}
+
+	return bn
+}
+
+func BigToCompact(n *big.Int) uint64 {
+	if n.Sign() == 0 {
+		return 0
+	}
+
+	var mantissa uint64
+	// Bytes() returns the absolute value of n as a big-endian byte slice
+	exponent := uint(len(n.Bytes()))
+
+	// Bits() returns the absolute value of n as a little-endian uint64 slice
+	if exponent <= 3 {
+		mantissa = uint64(n.Bits()[0])
+		mantissa <<= 8 * (3 - exponent)
+	} else {
+		tn := new(big.Int).Set(n)
+		// Since the base for the exponent is 256, the exponent can be treated
+		// as the number of bytes to represent the full 256-bit number. And as
+		// the exponent is treated as the number of bytes, Rsh 8*(exponent-3)
+		// makes sure that the shifted tn won't occupy more than 8*3=24 bits,
+		// and can be read from Bits()[0], which is 64-bit
+		mantissa = uint64(tn.Rsh(tn, 8*(exponent-3)).Bits()[0])
+	}
+
+	if mantissa&0x0080000000000000 != 0 {
+		mantissa >>= 8
+		exponent++
+	}
+
+	compact := uint64(exponent)<<56 | mantissa
+	if n.Sign() < 0 {
+		compact |= 0x0080000000000000
+	}
+	return compact
 }
