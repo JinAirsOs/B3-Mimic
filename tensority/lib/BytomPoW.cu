@@ -60,8 +60,8 @@ void initMatVecGpu(BytomMatListGpu* matListGpu_int8, BytomMatList* matList_int8)
 
 void mulmatrix(Mat256x256i8 *mat, BytomMatListGpu* matListGpu_int8, std::vector<uint8_t> fourSeq[4]){
 
-    clock_t start, end;
-    start = clock();
+    //clock_t start, end;
+    //start = clock();
     int n = 256;
     int k = 256;
     int m = 256;
@@ -99,7 +99,7 @@ void mulmatrix(Mat256x256i8 *mat, BytomMatListGpu* matListGpu_int8, std::vector<
         matrix_add<<<grid, block>>>(n, mat5_g, a);
     }
     cudaMemcpy(mat->d, mat5_g, sizeof(int8_t) * n * n, cudaMemcpyDeviceToHost);
-	end = clock();
+	//end = clock();
 //printf("%d \n", mat->d[0][0]);
 	//std::cout << "mulmatrix: "
 	//	<< (double)(end - start) / CLOCKS_PER_SEC << "s"
