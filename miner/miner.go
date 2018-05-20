@@ -18,7 +18,6 @@ import (
 	"encoding/hex"
 	"math/big"
 
-	"github.com/btccpool/bytom-pool/proxy"
 	"github.com/bytom/consensus/difficulty"
 	"github.com/bytom/protocol/bc"
 	"github.com/bytom/protocol/bc/types"
@@ -46,8 +45,8 @@ type Miner struct {
 	LatestJobId string
 	MsgId       uint64
 	Session     net.Conn
-	dataCh      chan string
-	QuitCh      chan struct{}
+	//dataCh      chan string
+	QuitCh chan struct{}
 }
 
 type t_err struct {
@@ -88,13 +87,23 @@ type t_jobntf struct {
 	Params  t_job  `json:"params, omitempty"`
 }
 
+type SubmitReq struct {
+	Id    string `json:"id"`
+	JobId string `json:"job_id"`
+	Nonce string `json:"nonce"`
+}
+
+type LoginReq struct {
+	Login    string `json:"login"`
+	Password string `json:"pass"`
+	Agent    string `json:"agent"`
+}
+
 var (
 	poolAddr string
 	login    string
-	MinerNum int32 = 100 //bytom miners number to test
-	Cnt      int32 = 0   //alive miners counter
-	DEBUG    bool  = false
-	MOCK     bool  = false
+	DEBUG    bool = false
+	MOCK     bool = false
 )
 
 const (
@@ -112,21 +121,23 @@ func main() {
 	flag.Parse()
 	poolAddr = *pool
 	login = *user
-	done := make(chan struct{})
+
 	if *thread > 1 {
 		runtime.GOMAXPROCS(*thread)
 	}
-
+reboot:
+	done := make(chan struct{})
 	log.Printf("Running with %v threads", *thread)
-	startMining(MinerNum, done)
+	startMining(done)
 	select {
 	case <-done:
+		goto reboot
 		log.Printf("Miner test finished")
 	}
 }
 
 //start mine bytom
-func startMining(n int32, closeCh chan struct{}) error {
+func startMining(closeCh chan struct{}) error {
 	log.Println("Miner  start")
 
 	go func(done chan struct{}) {
@@ -148,44 +159,25 @@ func NewMiner(login, pool string) (m *Miner, err error) {
 	}
 
 	m = &Miner{
-		ID:      login,
-		Address: login,
-		Pool:    pool, //the address to receive miner profit
-		Session: conn,
-		status:  true,
-		dataCh:  make(chan string, 64),
-		QuitCh:  make(chan struct{}),
+		ID:          login,
+		Address:     login,
+		Pool:        pool, //the address to receive miner profit
+		Session:     conn,
+		status:      true,
+		LatestJobId: "",
+		MsgId:       0,
+		//dataCh:      make(chan string, 64),
+		QuitCh: make(chan struct{}),
 	}
 
 	return
-}
-
-//{"id": "antminer_1", "job_id": "1285153", "nonce": "0000026f80000ab9"}
-func (m *Miner) SubmitWork() (err error) {
-	req := RpcRequest{
-		ID:     m.ID,
-		Method: "submit",
-		Params: proxy.SubmitReq{
-			Id:    m.ID,
-			JobId: "1285153",
-			Nonce: "0000026f80000ab9",
-		},
-		Worker: m.ID,
-	}
-
-	if err := m.WriteStratumRequest(req, time.Now().Add(10*time.Second)); err != nil {
-		log.Println("error in test miner submitwork()")
-		log.Println(err.Error())
-		return err
-	}
-	return nil
 }
 
 func (m *Miner) Login() (err error) {
 	req := RpcRequest{
 		ID:     m.ID,
 		Method: "login",
-		Params: proxy.LoginReq{Login: m.Address, Password: "password", Agent: "bmminer/2.0.0"},
+		Params: LoginReq{Login: m.Address, Password: "password", Agent: "bmminer/2.0.0"},
 		Worker: m.ID,
 	}
 
@@ -240,25 +232,10 @@ func (m *Miner) Start() error {
 		}
 	}()
 
-	//submitWork per second
-	/*go func() {
-		for {
-			time.Sleep(3 * time.Second)
-			m.SubmitWork()
-		}
-	}()
-	*/
-	go func() {
-		for data := range m.dataCh {
-
-			log.Println("miner", m.ID, "get the response: ", data)
-			m.status = true
-		}
-	}()
 	select {
 	case <-m.QuitCh:
 		log.Println("Miner ", m.ID, m.Address, "quit")
-		close(m.dataCh)
+		//close(m.dataCh)
 		m.Session.Close()
 		m.status = false
 	}
@@ -336,32 +313,33 @@ func (m *Miner) Mine(job t_job) bool {
 			if difficulty.CheckProofOfWork(&headerHash, &seedHash, difficulty.BigToCompact(newDiff)) {
 				log.Printf("Job %s: Target found! Proof hash: 0x%v\n", job.JobId, headerHash.String())
 
-				nonceStr := strconv.FormatUint(i, 16)
-				// nonceStr = strSwitchEndian(fmt.Sprintf("%016s", nonceStr))
-				nonceStr = fmt.Sprintf("%016s", nonceStr)
-				if DEBUG {
-					log.Printf("Job %s: Sending back nonce as string: %s", job.JobId, nonceStr)
-				}
-
-				send_msg := `{"method": "submit", "params": {"id": "`
-				send_msg += login
-				send_msg += `", "job_id": "`
-				send_msg += job.JobId
-				send_msg += `", "nonce": "`
-				send_msg += nonceStr
-				send_msg += `"}, "id":`
-				send_msg += strconv.FormatUint(m.MsgId, 10)
-				send_msg += `}`
-				m.MsgId += 1
-				m.Session.Write([]byte(send_msg))
-				m.Session.Write([]byte(flush))
-				log.Printf("Job %s: Sent: %s", job.JobId, send_msg)
-				// return true
+				m.SubmitWork(job.JobId, i)
 			}
 		}
 	}
 	log.Printf("Job %s: Stop at nonce:\t\t0x%016x = %d\n", job.JobId, bh.Nonce, bh.Nonce)
 	return false
+}
+
+//{"id": "antminer_1", "job_id": "1285153", "nonce": "0000026f80000ab9"}
+func (m *Miner) SubmitWork(jobId string, nonce uint64) (err error) {
+	req := RpcRequest{
+		ID:     m.ID,
+		Method: "submit",
+		Params: SubmitReq{
+			Id:    m.ID,
+			JobId: jobId,
+			Nonce: getNonceStr(nonce),
+		},
+		Worker: m.ID,
+	}
+
+	if err := m.WriteStratumRequest(req, time.Now().Add(10*time.Second)); err != nil {
+		log.Println("error in test miner submitwork()")
+		log.Println(err.Error())
+		return err
+	}
+	return nil
 }
 
 func mock_input(presp *StratumResp) {
@@ -460,4 +438,11 @@ func getNewTargetDiff(target string) *big.Int {
 	//newDiff = new(big.Int).Mul(difficulty.CompactToBig(blockheaderBits), newDiff)
 	//log.Printf("New target: %v\n", newDiff)
 	return newDiff
+}
+
+func getNonceStr(i uint64) string {
+	nonceStr := strconv.FormatUint(i, 16)
+	// nonceStr = strSwitchEndian(fmt.Sprintf("%016s", nonceStr))
+	nonceStr = fmt.Sprintf("%016s", nonceStr)
+	return nonceStr
 }
