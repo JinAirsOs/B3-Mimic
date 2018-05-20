@@ -56,6 +56,7 @@ type t_jobntf struct {
 
 const (
 	maxNonce = ^uint64(0)              // 2^64 - 1 = 18446744073709551615
+	//poolAddr = "127.0.0.1:4444" //39.107.125.245
 	poolAddr = "stratum.btcc.com:9221" //39.107.125.245
 	login    = `bm1qh7e8309j24faltn5auurwqawlza5ylwxkzudsc.1`
 

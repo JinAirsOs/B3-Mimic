@@ -3,15 +3,12 @@ CUDA_ARCH_FLAGS ?= -arch=sm_60 \
  -gencode=arch=compute_61,code=sm_61 
 CC_FLAGS += --std=c++11 $(CUDA_ARCH_FLAGS)
 
-all: cSimdTs.a test_bytom 
+all: cSimdTs.a
 
 cSimdTs.a: BytomPoW.o sha3.o byte_order.o cSimdTs.o
 	ar crv $@ byte_order.o sha3.o cSimdTs.o BytomPoW.o
 	mv cSimdTs.a ..
 	cd .. && go test
-
-test_bytom.o: test_BytomPoW.cpp
-	g++ -o $@ -c $< -I/usr/local/cuda/include
 
 test_matrix : test_matrix.cpp matrix.o
 	g++ -o $@ $< matrix.o -I/usr/local/cuda/include  -I. -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -lcublas -lcudart -lpthread -O3 
