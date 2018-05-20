@@ -10,9 +10,6 @@ cSimdTs.a: BytomPoW.o sha3.o byte_order.o cSimdTs.o
 	mv cSimdTs.a ..
 	cd .. && go test
 
-test_bytom: dgemm.o test_bytom.o sha3.o byte_order.o BytomPoW.o 
-	g++ -o test_bytom byte_order.c sha3.c  test_BytomPoW.cpp BytomPoW.cpp  dgemm.o -I. -lpthread -O3  -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -lcublas -lcudart
-
 test_bytom.o: test_BytomPoW.cpp
 	g++ -o $@ -c $< -I/usr/local/cuda/include
 
@@ -36,6 +33,6 @@ cSimdTs.o: cSimdTs.cpp
 	g++ -std=c++11 -o $@ -c $< -fPIC -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -lcublas -lcudart -lpthread -O3 
 
 clean:
-	rm *.o test_bytom cSimdTs.so
+	rm *.o
 
 
