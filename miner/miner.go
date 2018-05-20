@@ -1,21 +1,54 @@
+//simulator bytom miner
 package main
 
 import (
+	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net"
+	"runtime"
 	"strconv"
+	//"strings"
+	//"sync"
+	//"sync/atomic"
+	"time"
 	// "time"
 	"encoding/hex"
-	"flag"
 	"math/big"
 
+	"github.com/btccpool/bytom-pool/proxy"
 	"github.com/bytom/consensus/difficulty"
 	"github.com/bytom/protocol/bc"
 	"github.com/bytom/protocol/bc/types"
-	// "github.com/bytom/consensus"
 )
+
+type RpcRequest struct {
+	Method string      `json:"method"`
+	Params interface{} `json:"params"`
+	ID     string      `json:"id"`
+	Worker string      `json:"worker"`
+}
+
+type RpcResponse struct {
+	ID         string          `json:"id"`
+	Result     json.RawMessage `json:"result"`
+	Error      json.RawMessage `json:"error"`
+	RpcVersion string          `json:"jsonrpc"`
+}
+
+type Miner struct {
+	ID          string
+	Pool        string
+	status      bool
+	Address     string
+	LatestJobId string
+	MsgId       uint64
+	Session     net.Conn
+	dataCh      chan string
+	QuitCh      chan struct{}
+}
 
 type t_err struct {
 	Code    uint64 `json:"code"`
@@ -42,7 +75,7 @@ type t_result struct {
 	Status string `json:"status"`
 }
 
-type t_resp struct {
+type StratumResp struct {
 	Id      int64    `json:"id"`
 	Jsonrpc string   `json:"jsonrpc, omitempty"`
 	Result  t_result `json:"result, omitempty"`
@@ -56,105 +89,205 @@ type t_jobntf struct {
 }
 
 var (
+	poolAddr string
+	login    string
+	MinerNum int32 = 100 //bytom miners number to test
+	Cnt      int32 = 0   //alive miners counter
+	DEBUG    bool  = false
+	MOCK     bool  = false
+)
+
+const (
 	maxNonce = ^uint64(0) // 2^64 - 1 = 18446744073709551615
-	//poolAddr = "127.0.0.1:4444" //39.107.125.245
-	poolAddr = "stratum.btcc.com:9221" //39.107.125.245
-	login    = `bm1qh7e8309j24faltn5auurwqawlza5ylwxkzudsc.1`
-
-	flush = "\r\n\r\n"
-	MOCK  = false
-	DEBUG = false
-	esHR  = uint64(166) //estimated Hashrate. 1 for Go, 10 for simd, 166 for gpu, 900 for B3
+	flush    = "\r\n\r\n"
+	esHR     = uint64(166) //estimated Hashrate. 1 for Go, 10 for simd, 166 for gpu, 900 for B3
 )
 
-var (
-	MsgId     = uint64(0)
-	Diff1     = StringToBig("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
-	newestJob = ""
-)
+var Diff1 = StringToBig("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
 
 func main() {
 	pool := flag.String("pool", "stratum.btcc.com:9221", "Mining Pool stratum+tcp:// Addr")
 	user := flag.String("user", "bm1qh7e8309j24faltn5auurwqawlza5ylwxkzudsc.1", "login user , bytomAddress.[rigname]")
-
+	thread := flag.Int("thread", 2, "runtime max thread")
 	flag.Parse()
 	poolAddr = *pool
 	login = *user
-login:
-	MsgId += 1
-	conn, err := net.Dial("tcp", poolAddr)
-	if err != nil {
-		log.Println(err)
-		MsgId = uint64(0)
-		goto login
-	}
-	defer conn.Close()
-
-	send_msg := `{"method": "login", "params": {"login": "`
-	send_msg += login
-	send_msg += `", "pass": "123", "agent": "bmminer/2.0.0"}, "id": `
-	send_msg += strconv.FormatUint(MsgId, 10)
-	send_msg += `}`
-	MsgId += 1
-	conn.Write([]byte(send_msg))
-	conn.Write([]byte(flush))
-	log.Printf("Sent: %s", send_msg)
-	buff := make([]byte, 1024)
-	n, _ := conn.Read(buff)
-	log.Printf("----login job received----\n%s\n", buff[:n])
-	var resp t_resp
-	json.Unmarshal([]byte(buff[:n]), &resp)
-
-	if DEBUG && MOCK {
-		mock_input(&resp)
+	done := make(chan struct{})
+	if *thread > 1 {
+		runtime.GOMAXPROCS(*thread)
 	}
 
-	newestJob = resp.Result.Job.JobId
-	go func(job t_job, conn net.Conn) {
-		mine(job, conn)
-	}(resp.Result.Job, conn)
+	log.Printf("Running with %v threads", *thread)
+	startMining(MinerNum, done)
+	select {
+	case <-done:
+		log.Printf("Miner test finished")
+	}
+}
 
-	for true {
-		buff = make([]byte, 1024)
-		n, err = conn.Read(buff)
+//start mine bytom
+func startMining(n int32, closeCh chan struct{}) error {
+	log.Println("Miner  start")
+
+	go func(done chan struct{}) {
+		miner, err := NewMiner(login, poolAddr)
 		if err != nil {
-			log.Println(err)
-			break
+			return
 		}
+		miner.Start()
+		close(done)
+	}(closeCh)
 
-		var jobntf t_jobntf
-		json.Unmarshal([]byte(buff[:n]), &jobntf)
+	return nil
+}
 
-		if jobntf.Method == "job" {
-			log.Printf("----new job received----\n%s\n", buff[:n])
-			newestJob = jobntf.Params.JobId
-			go func(job t_job, conn net.Conn) {
-				mine(job, conn)
-			}(jobntf.Params, conn)
-		} else {
-			log.Printf("Received: %s\n", buff[:n])
-		}
+func NewMiner(login, pool string) (m *Miner, err error) {
+	conn, err := net.Dial("tcp", pool)
+	if err != nil {
+		return
 	}
-	MsgId = uint64(0)
-	goto login
+
+	m = &Miner{
+		ID:      login,
+		Address: login,
+		Pool:    pool, //the address to receive miner profit
+		Session: conn,
+		status:  true,
+		dataCh:  make(chan string, 64),
+		QuitCh:  make(chan struct{}),
+	}
+
+	return
 }
 
-/*
-type BlockHeader struct {
-    Version             uint64  // The version of the block.
-    Height              uint64  // The height of the block.
-    PreviousBlockHash   bc.Hash // The hash of the previous block.
-    Timestamp           uint64  // The time of the block in seconds.
-    Nonce               uint64  // Nonce used to generate the block.
-    Bits                uint64  // Difficulty target for the block.
-    BlockCommitment     types.BlockCommitment{
-                            TransactionsMerkleRoot: node.transactionsMerkleRoot,
-                            TransactionStatusHash:  node.transactionStatusHash,
-                        },
-}
-*/
+//{"id": "antminer_1", "job_id": "1285153", "nonce": "0000026f80000ab9"}
+func (m *Miner) SubmitWork() (err error) {
+	req := RpcRequest{
+		ID:     m.ID,
+		Method: "submit",
+		Params: proxy.SubmitReq{
+			Id:    m.ID,
+			JobId: "1285153",
+			Nonce: "0000026f80000ab9",
+		},
+		Worker: m.ID,
+	}
 
-func mine(job t_job, conn net.Conn) bool {
+	if err := m.WriteStratumRequest(req, time.Now().Add(10*time.Second)); err != nil {
+		log.Println("error in test miner submitwork()")
+		log.Println(err.Error())
+		return err
+	}
+	return nil
+}
+
+func (m *Miner) Login() (err error) {
+	req := RpcRequest{
+		ID:     m.ID,
+		Method: "login",
+		Params: proxy.LoginReq{Login: m.Address, Password: "password", Agent: "bmminer/2.0.0"},
+		Worker: m.ID,
+	}
+
+	if err := m.WriteStratumRequest(req, time.Now().Add(10*time.Second)); err != nil {
+		log.Println("error in test miner login()")
+		log.Println(err.Error())
+		return err
+	}
+	return nil
+}
+
+func (m *Miner) Start() error {
+
+	//subscribe server login
+	if err := m.Login(); err != nil {
+		log.Println(err.Error())
+		close(m.QuitCh)
+		//return err
+	}
+	reply, err := bufio.NewReader(m.Session).ReadBytes('\n')
+	if len(reply) == 0 || err != nil {
+		close(m.QuitCh)
+	}
+	var resp StratumResp
+	json.Unmarshal(reply, &resp)
+	m.LatestJobId = resp.Result.Job.JobId
+	go func(job t_job) {
+		m.Mine(job)
+	}(resp.Result.Job)
+	//listen to the server message
+	go func() {
+		for {
+			message, err := bufio.NewReader(m.Session).ReadBytes('\n')
+			if len(message) == 0 || err != nil {
+				close(m.QuitCh)
+				break
+			}
+
+			fmt.Println("Message from server: ", string(message))
+			var jobntf t_jobntf
+			json.Unmarshal(message, &jobntf)
+
+			if jobntf.Method == "job" {
+				log.Printf("----new job received----\n%s\n", message)
+				m.LatestJobId = jobntf.Params.JobId
+				go func(job t_job) {
+					m.Mine(job)
+				}(jobntf.Params)
+			} else {
+				log.Printf("Received: %s\n", message)
+			}
+		}
+	}()
+
+	//submitWork per second
+	/*go func() {
+		for {
+			time.Sleep(3 * time.Second)
+			m.SubmitWork()
+		}
+	}()
+	*/
+	go func() {
+		for data := range m.dataCh {
+
+			log.Println("miner", m.ID, "get the response: ", data)
+			m.status = true
+		}
+	}()
+	select {
+	case <-m.QuitCh:
+		log.Println("Miner ", m.ID, m.Address, "quit")
+		close(m.dataCh)
+		m.Session.Close()
+		m.status = false
+	}
+	return nil
+}
+
+//send stratum request to mining pool
+func (m *Miner) WriteStratumRequest(req RpcRequest, deadline time.Time) error {
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		log.Println("WriteStratumRequest marshal", err.Error())
+		return err
+	}
+
+	data = append(data, byte('\n'))
+
+	if err := m.Session.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+
+	if _, err := m.Session.Write(data); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *Miner) Mine(job t_job) bool {
 	seedHash, err1 := DecodeHash(job.Seed)
 	PreBlckHsh, err2 := DecodeHash(job.PreBlckHsh)
 	TxMkRt, err3 := DecodeHash(job.TxMkRt)
@@ -179,16 +312,7 @@ func mine(job t_job, conn net.Conn) bool {
 	}
 
 	log.Printf("Job %s: Mining at height: %d\n", job.JobId, bh.Height)
-	//padded := make([]byte, 32)
-	/*targetHex := job.Target
-	  decoded, _ := hex.DecodeString(targetHex)
-	  decoded = reverse(decoded)
-	  copy(padded[:len(decoded)], decoded)
-	  newDiff := new(big.Int).SetBytes(padded)
-	  newDiff = new(big.Int).Div(Diff1, newDiff)
-	  log.Printf("Job %s: Old target: %v\n", job.JobId, difficulty.CompactToBig(bh.Bits))
-	  newDiff = new(big.Int).Mul(difficulty.CompactToBig(bh.Bits), newDiff)
-	*/
+
 	log.Printf("Job %s: Old target: %v\n", job.JobId, difficulty.CompactToBig(bh.Bits))
 	newDiff := getNewTargetDiff(job.Target)
 	log.Printf("Job %s: New target: %v\n", job.JobId, newDiff)
@@ -197,7 +321,7 @@ func mine(job t_job, conn net.Conn) bool {
 	log.Printf("Job %s: Start from nonce:\t0x%016x = %d\n", job.JobId, nonce, nonce)
 	// for i := nonce; i <= nonce+consensus.TargetSecondsPerBlock*esHR && i <= maxNonce; i++ {
 	for i := nonce; i <= maxNonce; i++ {
-		if job.JobId != newestJob {
+		if job.JobId != m.LatestJobId {
 			log.Printf("Job %s: Expired", job.JobId)
 			return false
 		} else {
@@ -226,11 +350,11 @@ func mine(job t_job, conn net.Conn) bool {
 				send_msg += `", "nonce": "`
 				send_msg += nonceStr
 				send_msg += `"}, "id":`
-				send_msg += strconv.FormatUint(MsgId, 10)
+				send_msg += strconv.FormatUint(m.MsgId, 10)
 				send_msg += `}`
-				MsgId += 1
-				conn.Write([]byte(send_msg))
-				conn.Write([]byte(flush))
+				m.MsgId += 1
+				m.Session.Write([]byte(send_msg))
+				m.Session.Write([]byte(flush))
 				log.Printf("Job %s: Sent: %s", job.JobId, send_msg)
 				// return true
 			}
@@ -240,7 +364,7 @@ func mine(job t_job, conn net.Conn) bool {
 	return false
 }
 
-func mock_input(presp *t_resp) {
+func mock_input(presp *StratumResp) {
 	body := `{
                 "id":1,
                 "jsonrpc":"2.0",
