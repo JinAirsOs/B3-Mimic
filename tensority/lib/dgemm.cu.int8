@@ -1,0 +1,120 @@
+#include <string.h>
+#include <time.h>
+//#include <sys/time.h>
+#include <typeinfo>
+#include <cublas.h>
+#include <cuda_runtime.h>
+#include <string.h>
+#include <cublas_v2.h>
+#include <iostream>
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
+#include <stdint.h>
+#include "BytomPoW.h"
+#include "dgemm.h"
+
+__device__ char mat7_g[16][256][256 * 256];
+
+using namespace std;
+__global__ void matrix_transpose(int k, int *x, char *y)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int n = i / k;
+    int m = i - n * k;
+    int v = x[i];
+    y[m * k + n] = (char)(((v&0xFF)+ ((v>>8)&0xFF))&0xFF);
+}
+
+__global__ void matrix_add(int k, int8_t *x, char *y)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int8_t tmp = x[i] + y[i];
+    x[i] = tmp;//(tmp&0xFF);
+}
+
+__global__ void cast_to_float(int k, char *x,  int index, int si)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    mat7_g[index][si][i] = x[i];
+}
+
+
+__global__ void initial(int k, char *x)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int n = i / k;
+    int m = i - n * k;
+    if (m == n)
+        x[i] = 1;
+    else
+        x[i] = 0;
+
+}
+
+void mulmatrix(sha3_ctx *ctx, Mat256x256i8 *mat, const uint8_t *fixedMessage, uint32_t len, int index, bool init_seed) {
+
+    clock_t start, end;
+    start = clock();
+    int n = 256;
+    int k = 256;
+    int m = 256;
+    cublasOperation_t opt1 = CUBLAS_OP_T;
+    cublasOperation_t opt2 = CUBLAS_OP_T;
+    char *a; // a
+    char *b; // b
+    int *c; // c
+    char *mat4_g; // tmp
+    int8_t *mat5_g; // sum
+    char *mat6_g; // int
+    int alpha = 1;
+    int beta = 0;
+    cudaMalloc((void **)&(a), sizeof(char) * m * k);
+    cudaMalloc((void **)&(b), sizeof(char) * n * k);
+    cudaMalloc((void **)&(c), sizeof(int) * m * n);
+    cudaMalloc((void **)&(mat4_g), sizeof(char) * m * n);
+    cudaMalloc((void **)&(mat5_g), sizeof(int8_t) * m * n);
+    cudaMalloc((void **)&(mat6_g), sizeof(char) * m * n);
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    int grid = 256;
+    int block = 256;
+    initial<<<grid, block>>>(n, mat4_g);
+    if (init_seed) {
+        for (int i = 0; i < 256; i++ ){
+            cudaMemcpy(mat6_g, matList_int8->at(i).d, sizeof(char) * n * n, cudaMemcpyHostToDevice);
+            cast_to_float<<<grid, block>>>(n, mat6_g, index, i);
+        }
+    }
+    for(int ki=0; ki<4; ki++) { // The k-loop
+        uint8_t sequence[128];
+        rhash_sha3_256_init(ctx);
+        rhash_sha3_update(ctx, fixedMessage+(len* ki/4), len/4);//
+        rhash_sha3_final(ctx, sequence);
+        for(int j=0; j<2; j++) {
+            for(int i=0; i<32; i++) {
+                cudaMemcpyFromSymbol(b, mat7_g, sizeof(char) * n * n, (index * 256 + sequence[i]) * sizeof(char) * 65536, cudaMemcpyDeviceToDevice);
+                if (i + j == 0)
+                    cublasGemmEx(handle, opt1, opt2, n, m, k, &alpha, mat4_g, CUDA_R_8I, n, b, CUDA_R_8I, n, &beta, c, CUDA_R_32I, n, CUDA_R_32I, CUBLAS_GEMM_DEFAULT);
+                    //cublasSgemm(handle, opt1, opt2, m, n, k, &alpha, mat4_g, n, b, n, &beta, c, n);
+                else
+                    cublasGemmEx(handle, opt1, opt2, n, m, k, &alpha, a, CUDA_R_8I, n, b, CUDA_R_8I, n, &beta, c, CUDA_R_32I, n, CUDA_R_32I, CUBLAS_GEMM_DEFAULT);
+                    //cublasSgemm(handle, opt1, opt2, m, n, k, &alpha, a, n, b, n, &beta, c, n);
+                matrix_transpose<<<grid, block>>>(n, c, a);
+            }
+        }
+        matrix_add<<<grid, block>>>(n, mat5_g, a);
+    }
+    cudaMemcpy(mat->d, mat5_g, sizeof(int8_t) * n * n, cudaMemcpyDeviceToHost);
+    end = clock();
+    std::cout << "mulmatrix: "
+          << (double)(end - start) / CLOCKS_PER_SEC << "s"
+          << std::endl;
+    cublasDestroy(handle);
+    cudaFree(a);
+    cudaFree(b);
+    cudaFree(c);
+    cudaFree(mat4_g);
+    cudaFree(mat5_g);
+    cudaFree(mat6_g);
+}
