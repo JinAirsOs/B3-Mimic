@@ -3,24 +3,22 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
+	"os"
 	"runtime"
 	"strconv"
-	//"strings"
-	//"sync"
-	//"sync/atomic"
 	"time"
-	// "time"
-	"encoding/hex"
-	"math/big"
 
 	"github.com/bytom/consensus/difficulty"
 	"github.com/bytom/protocol/bc"
 	"github.com/bytom/protocol/bc/types"
+	bytomutil "github.com/bytom/util"
 )
 
 type RpcRequest struct {
@@ -49,12 +47,12 @@ type Miner struct {
 	QuitCh chan struct{}
 }
 
-type t_err struct {
+type PoolErr struct {
 	Code    uint64 `json:"code"`
 	Message string `json:"message"`
 }
 
-type t_job struct {
+type MineJob struct {
 	Version    string `json:"version"`
 	Height     string `json:"height"`
 	PreBlckHsh string `json:"previous_block_hash"`
@@ -68,23 +66,23 @@ type t_job struct {
 	Target     string `json:"target"`
 }
 
-type t_result struct {
-	Id     string `json:"id"`
-	Job    t_job  `json:"job"`
-	Status string `json:"status"`
+type Result struct {
+	Id     string  `json:"id"`
+	Job    MineJob `json:"job"`
+	Status string  `json:"status"`
 }
 
 type StratumResp struct {
-	Id      int64    `json:"id"`
-	Jsonrpc string   `json:"jsonrpc, omitempty"`
-	Result  t_result `json:"result, omitempty"`
-	Error   t_err    `json:"error, omitempty"`
+	Id      int64   `json:"id"`
+	Jsonrpc string  `json:"jsonrpc, omitempty"`
+	Result  Result  `json:"result, omitempty"`
+	Error   PoolErr `json:"error, omitempty"`
 }
 
-type t_jobntf struct {
-	Jsonrpc string `json:"jsonrpc, omitempty"`
-	Method  string `json:"method, omitempty"`
-	Params  t_job  `json:"params, omitempty"`
+type MineJobntf struct {
+	Jsonrpc string  `json:"jsonrpc, omitempty"`
+	Method  string  `json:"method, omitempty"`
+	Params  MineJob `json:"params, omitempty"`
 }
 
 type SubmitReq struct {
@@ -99,20 +97,18 @@ type LoginReq struct {
 	Agent    string `json:"agent"`
 }
 
+type SubmitWorkReq struct {
+	BlockHeader *types.BlockHeader `json:"block_header"`
+}
+
 var (
 	poolAddr string
 	login    string
 	DEBUG    bool = false
 	MOCK     bool = false
+	maxNonce      = ^uint64(0) // 2^64 - 1 = 18446744073709551615
+	Diff1         = StringToBig("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
 )
-
-const (
-	maxNonce = ^uint64(0) // 2^64 - 1 = 18446744073709551615
-	flush    = "\r\n\r\n"
-	esHR     = uint64(166) //estimated Hashrate. 1 for Go, 10 for simd, 166 for gpu, 900 for B3
-)
-
-var Diff1 = StringToBig("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
 
 func main() {
 	pool := flag.String("pool", "stratum.btcc.com:9221", "Mining Pool stratum+tcp:// Addr")
@@ -121,7 +117,7 @@ func main() {
 	flag.Parse()
 	poolAddr = *pool
 	login = *user
-
+	os.Setenv("BYTOM_URL", "127.0.0.1:9888")
 	if *thread > 1 {
 		runtime.GOMAXPROCS(*thread)
 	}
@@ -204,7 +200,7 @@ func (m *Miner) Start() error {
 	var resp StratumResp
 	json.Unmarshal(reply, &resp)
 	m.LatestJobId = resp.Result.Job.JobId
-	go func(job t_job) {
+	go func(job MineJob) {
 		m.Mine(job)
 	}(resp.Result.Job)
 	//listen to the server message
@@ -217,13 +213,13 @@ func (m *Miner) Start() error {
 			}
 
 			fmt.Println("Message from server: ", string(message))
-			var jobntf t_jobntf
+			var jobntf MineJobntf
 			json.Unmarshal(message, &jobntf)
 
 			if jobntf.Method == "job" {
 				log.Printf("----new job received----\n%s\n", message)
 				m.LatestJobId = jobntf.Params.JobId
-				go func(job t_job) {
+				go func(job MineJob) {
 					m.Mine(job)
 				}(jobntf.Params)
 			} else {
@@ -264,7 +260,7 @@ func (m *Miner) WriteStratumRequest(req RpcRequest, deadline time.Time) error {
 	return nil
 }
 
-func (m *Miner) Mine(job t_job) bool {
+func (m *Miner) Mine(job MineJob) bool {
 	seedHash, err1 := DecodeHash(job.Seed)
 	PreBlckHsh, err2 := DecodeHash(job.PreBlckHsh)
 	TxMkRt, err3 := DecodeHash(job.TxMkRt)
@@ -285,7 +281,7 @@ func (m *Miner) Mine(job t_job) bool {
 		},
 	}
 	if DEBUG {
-		view_parsing(bh, job)
+		viewParsing(bh, job)
 	}
 
 	log.Printf("Job %s: Mining at height: %d\n", job.JobId, bh.Height)
@@ -296,7 +292,7 @@ func (m *Miner) Mine(job t_job) bool {
 
 	nonce := str2ui64Li(job.Nonce)
 	log.Printf("Job %s: Start from nonce:\t0x%016x = %d\n", job.JobId, nonce, nonce)
-	// for i := nonce; i <= nonce+consensus.TargetSecondsPerBlock*esHR && i <= maxNonce; i++ {
+
 	for i := nonce; i <= maxNonce; i++ {
 		if job.JobId != m.LatestJobId {
 			log.Printf("Job %s: Expired", job.JobId)
@@ -313,7 +309,17 @@ func (m *Miner) Mine(job t_job) bool {
 			if difficulty.CheckProofOfWork(&headerHash, &seedHash, difficulty.BigToCompact(newDiff)) {
 				log.Printf("Job %s: Target found! Proof hash: 0x%v\n", job.JobId, headerHash.String())
 
-				m.SubmitWork(job.JobId, i)
+				if difficulty.CheckProofOfWork(&headerHash, &seedHash, bh.Bits) {
+					log.Println("Block found!")
+					go func(blockheader types.BlockHeader) {
+						m.SubmitBlock(blockheader)
+					}(*bh)
+				} else {
+					go func(jobid string, i uint64) {
+						m.SubmitWork(jobid, i)
+					}(job.JobId, i)
+				}
+				//m.SubmitWork(job.JobId, i)
 			}
 		}
 	}
@@ -342,33 +348,14 @@ func (m *Miner) SubmitWork(jobId string, nonce uint64) (err error) {
 	return nil
 }
 
-func mock_input(presp *StratumResp) {
-	body := `{
-                "id":1,
-                "jsonrpc":"2.0",
-                "result":{
-                    "id":"antminer_1",
-                    "job":{
-                        "version":"0100000000000000",
-                        "height":"0000000000000000",
-                        "previous_block_hash":"0000000000000000000000000000000000000000000000000000000000000000",
-                        "timestamp":"e55a685a00000000",
-                        "transactions_merkle_root":"237bf77df5c318dfa1d780043b507e00046fec7f8fdad80fc39fd8722852b27a",
-                        "transaction_status_hash":"53c0ab896cb7a3778cc1d35a271264d991792b7c44f5c334116bb0786dbc5635",
-                        "nonce":"1055400000000000",
-                        "bits":"ffff7f0000000020",
-                        "job_id":"16942",
-                        "seed":"8636e94c0f1143df98f80c53afbadad4fc3946e1cc597041d7d3f96aebacda07",
-                        "target":"c5a70000"
-                    },
-                    "status":"OK"
-                },
-                "error":null
-            }`
-	json.Unmarshal([]byte(body), &(*presp))
+func (m *Miner) SubmitBlock(bh types.BlockHeader) {
+	_, success := bytomutil.ClientCall("/submit-work", &SubmitWorkReq{BlockHeader: &bh})
+	if success == 0 {
+		log.Println("Mined new Block!")
+	}
 }
 
-func view_parsing(bh *types.BlockHeader, job t_job) {
+func viewParsing(bh *types.BlockHeader, job MineJob) {
 	log.Println("Printing parsing result:")
 	fmt.Println("\tVersion:", bh.Version)
 	fmt.Println("\tHeight:", bh.Height)
@@ -393,7 +380,7 @@ func str2ui64Li(str string) uint64 {
 }
 
 func strSwitchEndian(oldstr string) string {
-	// fmt.Println("old str:", oldstr)
+
 	slen := len(oldstr)
 	if slen%2 != 0 {
 		panic("hex string format error")
@@ -403,7 +390,7 @@ func strSwitchEndian(oldstr string) string {
 	for i := 0; i < slen; i += 2 {
 		newstr += oldstr[slen-i-2 : slen-i]
 	}
-	// fmt.Println("new str:", newstr)
+
 	return newstr
 }
 
@@ -442,7 +429,6 @@ func getNewTargetDiff(target string) *big.Int {
 
 func getNonceStr(i uint64) string {
 	nonceStr := strconv.FormatUint(i, 16)
-	// nonceStr = strSwitchEndian(fmt.Sprintf("%016s", nonceStr))
 	nonceStr = fmt.Sprintf("%016s", nonceStr)
 	return nonceStr
 }
