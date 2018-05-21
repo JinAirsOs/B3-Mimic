@@ -83,7 +83,7 @@ struct Words32 {
 		else if(i<32) return hi.w[i-16];
 		else {
 			assert(false);
-			return;
+			return hi.w[i-16];
 		}
 	}
 	void xor_other(const Words32& other) {
