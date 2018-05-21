@@ -6,6 +6,7 @@ package tensority
 import "C"
 
 import (
+	"log"
 	"unsafe"
 
 	"github.com/golang/groupcache/lru"
@@ -57,6 +58,7 @@ func (a *Cache) AddCache(hash, seed, result *bc.Hash) {
 func (a *Cache) Hash(hash, seed *bc.Hash) *bc.Hash {
 	key := calcCacheKey(hash, seed)
 	if v, ok := a.lruCache.Get(*key); ok {
+		log.Println("Cached hash!")
 		return v.(*bc.Hash)
 	}
 	calHash := algorithm(hash, seed)
