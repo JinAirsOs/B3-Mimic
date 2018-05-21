@@ -62,7 +62,7 @@ func (a *Cache) Hash(hash, seed *bc.Hash) *bc.Hash {
 		return v.(*bc.Hash)
 	}
 	calHash := algorithm(hash, seed)
-	a.AddCache(*hash, *seed, calHash)
+	a.AddCache(hash, seed, calHash)
 	return calHash
 }
 
