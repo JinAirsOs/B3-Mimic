@@ -74,7 +74,7 @@ type Result struct {
 }
 
 type StratumResp struct {
-	Id      int64   `json:"id"`
+	Id      string  `json:"id"`
 	Jsonrpc string  `json:"jsonrpc, omitempty"`
 	Result  Result  `json:"result, omitempty"`
 	Error   PoolErr `json:"error, omitempty"`
@@ -121,13 +121,13 @@ func main() {
 	if *thread > 1 {
 		runtime.GOMAXPROCS(*thread)
 	}
-	//reboot:
+reboot:
 	done := make(chan struct{})
 	log.Printf("Running with %v threads", *thread)
 	startMining(done)
 	select {
 	case <-done:
-		//goto reboot
+		goto reboot
 		log.Printf("Miner test finished")
 	}
 }
@@ -314,7 +314,7 @@ func (m *Miner) Mine(job MineJob) bool {
 	log.Printf("Job %s: Start from nonce:\t0x%016x = %d\n", job.JobId, nonce, nonce)
 
 	for i := nonce; i <= maxNonce; i++ {
-		if job.JobId != m.LatestJobId {
+		if job.JobId != m.LatestJobId || !m.Status {
 			log.Printf("Job %s: Expired", job.JobId)
 			return false
 		} else {
