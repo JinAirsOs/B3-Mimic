@@ -39,7 +39,7 @@ type RpcResponse struct {
 type Miner struct {
 	ID          string
 	Pool        string
-	status      bool
+	Status      bool
 	Address     string
 	LatestJobId string
 	MsgId       uint64
@@ -106,7 +106,6 @@ var (
 	poolAddr string
 	login    string
 	DEBUG    bool = false
-	MOCK     bool = false
 	maxNonce      = ^uint64(0) // 2^64 - 1 = 18446744073709551615
 	Diff1         = StringToBig("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
 )
@@ -122,13 +121,13 @@ func main() {
 	if *thread > 1 {
 		runtime.GOMAXPROCS(*thread)
 	}
-reboot:
+	//reboot:
 	done := make(chan struct{})
 	log.Printf("Running with %v threads", *thread)
 	startMining(done)
 	select {
 	case <-done:
-		goto reboot
+		//goto reboot
 		log.Printf("Miner test finished")
 	}
 }
@@ -140,6 +139,7 @@ func startMining(closeCh chan struct{}) error {
 	go func(done chan struct{}) {
 		miner, err := NewMiner(login, poolAddr)
 		if err != nil {
+			close(done)
 			return
 		}
 		miner.Start()
@@ -150,17 +150,17 @@ func startMining(closeCh chan struct{}) error {
 }
 
 func NewMiner(login, pool string) (m *Miner, err error) {
-	conn, err := net.Dial("tcp", pool)
+	/*conn, err := net.Dial("tcp", pool)
 	if err != nil {
 		return
-	}
+	}*/
 
 	m = &Miner{
-		ID:          login,
-		Address:     login,
-		Pool:        pool, //the address to receive miner profit
-		Session:     conn,
-		status:      true,
+		ID:      login,
+		Address: login, //the address to receive miner profit
+		Pool:    pool,
+		//Session:     conn,
+		Status:      true,
 		LatestJobId: "",
 		MsgId:       0,
 		//dataCh:      make(chan string, 64),
@@ -171,6 +171,12 @@ func NewMiner(login, pool string) (m *Miner, err error) {
 }
 
 func (m *Miner) Login() (err error) {
+	conn, err := net.Dial("tcp", m.Pool)
+	if err != nil {
+		return
+	}
+	m.Session = conn
+	m.Status = true
 	req := RpcRequest{
 		ID:     m.ID,
 		Method: "login",
@@ -183,6 +189,19 @@ func (m *Miner) Login() (err error) {
 		log.Println(err.Error())
 		return err
 	}
+	reply, err := bufio.NewReader(m.Session).ReadBytes('\n')
+	if len(reply) == 0 || err != nil {
+		close(m.QuitCh)
+	}
+	var resp StratumResp
+	err = json.Unmarshal(reply, &resp)
+	if err != nil {
+		return
+	}
+	m.LatestJobId = resp.Result.Job.JobId
+	go func(job MineJob) {
+		m.Mine(job)
+	}(resp.Result.Job)
 	return nil
 }
 
@@ -194,7 +213,7 @@ func (m *Miner) Start() error {
 		close(m.QuitCh)
 		//return err
 	}
-	reply, err := bufio.NewReader(m.Session).ReadBytes('\n')
+	/*reply, err := bufio.NewReader(m.Session).ReadBytes('\n')
 	if len(reply) == 0 || err != nil {
 		close(m.QuitCh)
 	}
@@ -203,7 +222,7 @@ func (m *Miner) Start() error {
 	m.LatestJobId = resp.Result.Job.JobId
 	go func(job MineJob) {
 		m.Mine(job)
-	}(resp.Result.Job)
+	}(resp.Result.Job)*/
 	//listen to the server message
 	go func() {
 		for {
@@ -234,7 +253,7 @@ func (m *Miner) Start() error {
 		log.Println("Miner ", m.ID, m.Address, "quit")
 		//close(m.dataCh)
 		m.Session.Close()
-		m.status = false
+		m.Status = false
 	}
 	return nil
 }
