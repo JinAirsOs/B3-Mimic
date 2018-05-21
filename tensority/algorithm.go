@@ -59,7 +59,9 @@ func (a *Cache) Hash(hash, seed *bc.Hash) *bc.Hash {
 	if v, ok := a.lruCache.Get(*key); ok {
 		return v.(*bc.Hash)
 	}
-	return algorithm(hash, seed)
+	calHash := algorithm(hash, seed)
+	a.AddCache(*hash, *seed, calHash)
+	return calHash
 }
 
 // AIHash is created for let different package share same cache
